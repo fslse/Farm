@@ -1,94 +1,131 @@
+/****************************************************************************
+ * Copyright (c) 2016 ~ 2025 liangxiegame UNDER MIT LICENSE
+ *
+ * https://qframework.cn
+ * https://github.com/liangxiegame/QFramework
+ * https://gitee.com/liangxiegame/QFramework
+ ****************************************************************************/
+
 using System;
 using UnityEngine;
 using Object = UnityEngine.Object;
 
 namespace QFramework
 {
-    public class AudioPlayer : IPoolable, IPoolType
+    public class AudioPlayer : IPoolable, IPoolType, IAudioKitOnFinish, IAudioKitOnRelease
     {
         private IAudioLoader mLoader;
-        private AudioSource mAudioSource;
+        private AudioSourceController mAudioSourceController;
+        private GameObject mGameObject;
+
         private string mName;
+        public BindableProperty<float> Volume { get; set; }
 
-        public string Name => mName;
-
-        private bool mIsLoop;
+        public string GetName => mName;
         private AudioClip mAudioClip;
         private TimeItem mTimeItem;
-        private bool mUsedCache = true;
-        private bool mIsCache = false;
 
-        private Action<AudioPlayer> mOnStartListener;
-        private Action<AudioPlayer> mOnFinishListener;
+        private Action mOnStart = null;
+        private Action mOnFinish = null;
+        private Action mOnRelease = null;
+
         private bool mIsPause = false;
         private float mLeftDelayTime = -1;
-        private int mPlayCount = 0;
-        private int mCustomEventID;
+        private float mVolumeScale = 1.0f;
+        private float mVolume;
+        private float mPitch = 1;
 
-        public AudioSource AudioSource => mAudioSource;
+        public AudioSource AudioSource => mAudioSourceController.AudioSource;
 
-        public int customEventID
+        internal static AudioPlayer Allocate(BindableProperty<float> volume)
         {
-            get => mCustomEventID;
-            set => mCustomEventID = -1;
-        }
-
-        public static AudioPlayer Allocate() => SafeObjectPool<AudioPlayer>.Instance.Allocate();
-
-        public void SetOnStartListener(Action<AudioPlayer> l) => mOnStartListener = l;
-
-        public void SetOnFinishListener(Action<AudioPlayer> l) => mOnFinishListener = l;
-
-        public bool usedCache
-        {
-            get => mUsedCache;
-            set => mUsedCache = false;
+            var player = SafeObjectPool<AudioPlayer>.Instance.Allocate();
+            player.Volume = volume;
+            player.mOnStart = null;
+            player.mOnFinish = null;
+            player.mVolume = 1.0f;
+            player.mVolumeScale = 1.0f;
+            player.mPitch = 1.0f;
+            player.Volume.RegisterWithInitValue(player.SetVolume);
+            return player;
         }
         
-        public bool IsRecycled
+        public AudioPlayer OnStart(Action onStart)
         {
-            get => mIsCache;
+            if (onStart == null) return this;
+            if (mOnStart == null)
+            {
+                mOnStart = onStart;
+            }
+            else
+            {
+                mOnStart += onStart;
+            }
 
-            set => mIsCache = value;
+            return this;
         }
 
-        public void SetAudioExt( GameObject root, AudioClip clip, string name, bool loop)
+        void IAudioKitOnFinish.OnFinish(Action onFinish)
+        {
+            if (onFinish == null) return;
+
+            if (mOnFinish == null)
+            {
+                mOnFinish = onFinish;
+            }
+            else
+            {
+                mOnFinish += onFinish;
+            }
+        }
+        
+        public bool UsedCache { get; set; } = true;
+        public bool IsRecycled { get; set; } = false;
+        public bool IsLoop { get; set; }
+
+        void AllocateAudioSourceController(GameObject root, string name)
+        {
+            if (mAudioSourceController == null)
+            {
+                mAudioSourceController = AudioSourceController.Allocate(root,name);
+            }
+            else
+            {
+                mAudioSourceController.Update(root, name);
+            }
+        }
+
+        public void SetAudioExt(GameObject root, AudioClip clip, string name, bool loop)
         {
             if (clip == null || mName == name)
             {
                 return;
             }
 
-            if (mAudioSource == null)
-            {
-                mAudioSource = root.AddComponent<AudioSource>();
-            }
+            AllocateAudioSourceController(root, name);
 
             CleanResources();
 
-            mIsLoop = loop;
+            IsLoop = loop;
             mName = name;
 
             mAudioClip = clip;
             PlayAudioClip();
         }
-        
-        public void SetAudio(GameObject root, string name, bool loop)
+
+        public AudioPlayer SetAudio(GameObject root, string name, bool loop)
         {
             if (string.IsNullOrEmpty(name))
             {
-                return;
+                return this;
             }
 
             if (mName == name)
             {
-                return;
+                return this;
             }
 
-            if (mAudioSource == null)
-            {
-                mAudioSource = root.AddComponent<AudioSource>();
-            }
+            AllocateAudioSourceController(root, name);
 
             //防止卸载后立马加载的情况
             var preLoader = mLoader;
@@ -99,7 +136,7 @@ namespace QFramework
 
             mLoader = AudioKit.Config.AudioLoaderPool.AllocateLoader();
 
-            mIsLoop = loop;
+            IsLoop = loop;
             mName = name;
 
             var keys = AudioSearchKeys.Allocate();
@@ -114,10 +151,7 @@ namespace QFramework
                 preLoader = null;
             }
 
-            // if (mLoader != null)
-            // {
-            //     mLoader.LoadAsync();
-            // }
+            return this;
         }
 
         public void Stop()
@@ -136,14 +170,14 @@ namespace QFramework
             //暂停
             if (mTimeItem != null)
             {
-                mLeftDelayTime = mTimeItem.SortScore - QFramework.Timer.Instance.currentScaleTime;
+                mLeftDelayTime = mTimeItem.SortScore - Timer.Instance.CurrentScaleTime;
                 mTimeItem.Cancel();
                 mTimeItem = null;
             }
 
             mIsPause = true;
 
-            mAudioSource.Pause();
+            mAudioSourceController.AudioSource.Pause();
         }
 
         public void Resume()
@@ -155,19 +189,47 @@ namespace QFramework
 
             if (mLeftDelayTime >= 0)
             {
-                mTimeItem = QFramework.Timer.Instance.Post2Scale(OnResumeTimeTick, mLeftDelayTime);
+                mTimeItem = Timer.Instance.Post2Scale(OnResumeTimeTick, mLeftDelayTime);
             }
 
             mIsPause = false;
 
-            mAudioSource.Play();
+            mAudioSourceController.AudioSource.Play();
         }
 
-        public void SetVolume(float volume)
+        public AudioPlayer Pitch(float pitch)
         {
-            if (mAudioSource)
+            mPitch = pitch;
+            UpdatePitch();
+            return this;
+        }
+
+        void UpdatePitch()
+        {
+            if (mAudioSourceController != null && mAudioSourceController.AudioSource)
             {
-                mAudioSource.volume = volume;
+                mAudioSourceController.AudioSource.pitch = mPitch;
+            }
+        }
+
+        public AudioPlayer VolumeScale(float volumeScale)
+        {
+            mVolumeScale = volumeScale;
+            UpdateVolume();
+            return this;
+        }
+
+        void SetVolume(float volume)
+        {
+            mVolume = volume;
+            UpdateVolume();
+        }
+
+        void UpdateVolume()
+        {
+            if (mAudioSourceController != null && mAudioSourceController.AudioSource)
+            {
+                mAudioSourceController.AudioSource.volume = mVolume * mVolumeScale;
             }
         }
 
@@ -179,7 +241,7 @@ namespace QFramework
                 return;
             }
 
-            mAudioClip =clip;
+            mAudioClip = clip;
 
             if (mAudioClip == null)
             {
@@ -193,67 +255,59 @@ namespace QFramework
 
         private void PlayAudioClip()
         {
-            if (mAudioSource == null || mAudioClip == null)
+            if (mAudioSourceController == null || mAudioSourceController.AudioSource == null || mAudioClip == null)
             {
                 Release();
                 return;
             }
 
-            mAudioSource.clip = mAudioClip;
-            mAudioSource.loop = mIsLoop;
-            mAudioSource.volume = 1.0f;
+            mAudioSourceController.AudioSource.clip = mAudioClip;
+            mAudioSourceController.AudioSource.loop = IsLoop;
+            UpdateVolume();
+            UpdatePitch();
 
             int loopCount = 1;
-            if (mIsLoop)
+            if (IsLoop)
             {
                 loopCount = -1;
             }
 
             mTimeItem = Timer.Instance.Post2Scale(OnSoundPlayFinish, mAudioClip.length, loopCount);
 
-            if (null != mOnStartListener)
-            {
-                mOnStartListener(this);
-            }
+            mOnStart?.Invoke();
+            mOnStart = null;
 
-            mAudioSource.Play();
+            mAudioSourceController.AudioSource.Play();
         }
 
         private void OnResumeTimeTick(int repeatCount)
         {
             OnSoundPlayFinish(repeatCount);
 
-            if (mIsLoop)
+            if (IsLoop)
             {
-                mTimeItem = QFramework.Timer.Instance.Post2Scale(OnSoundPlayFinish, mAudioClip.length, -1);
+                mTimeItem = Timer.Instance.Post2Scale(OnSoundPlayFinish, mAudioClip.length, -1);
             }
         }
 
         private void OnSoundPlayFinish(int count)
         {
-            ++mPlayCount;
-
-            if (mOnFinishListener != null)
+            if (!IsLoop)
             {
-                mOnFinishListener(this);
-            }
-
-            if (mCustomEventID > 0)
-            {
-                // QEventSystem.Instance.Send(mCustomEventID, this);
-            }
-
-            if (!mIsLoop)
-            {
+                mOnFinish?.Invoke();
+                mOnFinish = null;
                 Release();
             }
         }
 
         private void Release()
         {
+            mOnRelease?.Invoke();
+            mOnRelease = null;
+
             CleanResources();
 
-            if (mUsedCache)
+            if (UsedCache)
             {
                 Recycle2Cache();
             }
@@ -263,11 +317,9 @@ namespace QFramework
         {
             mName = null;
 
-            mPlayCount = 0;
             mIsPause = false;
-            mOnFinishListener = null;
+
             mLeftDelayTime = -1;
-            mCustomEventID = -1;
 
             if (mTimeItem != null)
             {
@@ -275,12 +327,12 @@ namespace QFramework
                 mTimeItem = null;
             }
 
-            if (mAudioSource)
+            if (mAudioSourceController != null && mAudioSourceController.AudioSource)
             {
-                if (mAudioSource.clip == mAudioClip)
+                if (mAudioSourceController.AudioSource.clip == mAudioClip)
                 {
-                    mAudioSource.Stop();
-                    mAudioSource.clip = null;
+                    mAudioSourceController.AudioSource.Stop();
+                    mAudioSourceController.AudioSource.clip = null;
                 }
             }
 
@@ -296,6 +348,9 @@ namespace QFramework
 
         public void OnRecycled()
         {
+            Volume?.UnRegister(SetVolume);
+            Volume = null;
+
             CleanResources();
         }
 
@@ -303,11 +358,23 @@ namespace QFramework
         {
             if (!SafeObjectPool<AudioPlayer>.Instance.Recycle(this))
             {
-                if (mAudioSource != null)
+                if (mAudioSourceController != null && mAudioSourceController.AudioSource)
                 {
-                    Object.Destroy(mAudioSource);
-                    mAudioSource = null;
+                    mAudioSourceController.Recycle2Cache();
+                    mAudioSourceController = null;
                 }
+            }
+        }
+
+        void IAudioKitOnRelease.OnRelease(Action onRelease)
+        {
+            if (mOnRelease == null)
+            {
+                mOnRelease = onRelease;
+            }
+            else
+            {
+                mOnRelease += onRelease;
             }
         }
     }

@@ -783,7 +783,7 @@ namespace QFramework
 
     public interface IEasyEvent
     {
-        IUnRegister Register(Action onEvent);
+        IUnRegister Register(Action onEvent); 
     }
 
     public class EasyEvent : IEasyEvent
@@ -794,6 +794,12 @@ namespace QFramework
         {
             mOnEvent += onEvent;
             return new CustomUnRegister(() => { UnRegister(onEvent); });
+        }
+
+        public IUnRegister RegisterWithACall(Action onEvent)
+        {
+            onEvent.Invoke();
+            return Register(onEvent);
         }
 
         public void UnRegister(Action onEvent) => mOnEvent -= onEvent;
@@ -812,6 +818,7 @@ namespace QFramework
         }
 
         public void UnRegister(Action<T> onEvent) => mOnEvent -= onEvent;
+        
 
         public void Trigger(T t) => mOnEvent?.Invoke(t);
 
@@ -916,6 +923,12 @@ namespace QFramework
             return new CustomUnRegister(() => { UnRegister(onEvent); });
         }
 
+        public IUnRegister RegisterWithACall(Action onEvent)
+        {
+            onEvent.Invoke();
+            return Register(onEvent);
+        }
+        
         public void UnRegister(Action onEvent)
         {
             mOnEvent -= onEvent;
